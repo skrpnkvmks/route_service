@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# защита от параллельного запуска
+exec 9>/run/split-direct.lock
+flock -n 9 || exit 0
+
 DOMAINS_FILE="/etc/split-direct/domains.txt"
 STATE_FILE="/run/split-direct.rules"
 PRIO_BASE=10000
@@ -22,18 +26,11 @@ require_cmd dig
 require_cmd awk
 require_cmd sort
 require_cmd uniq
+require_cmd sed
+require_cmd tr
+require_cmd mktemp
 
 mkdir -p /run
-
-# Удаляем ранее добавленные правила
-if [[ -f "$STATE_FILE" ]]; then
-  while IFS='|' read -r prio ipaddr; do
-    [[ -n "${prio:-}" && -n "${ipaddr:-}" ]] || continue
-    ip rule del to "${ipaddr}/32" lookup main priority "$prio" 2>/dev/null || true
-  done < "$STATE_FILE"
-fi
-
-: > "$STATE_FILE"
 
 if [[ ! -f "$DOMAINS_FILE" ]]; then
   log "Файл доменов не найден: $DOMAINS_FILE"
@@ -63,14 +60,25 @@ done
 
 mapfile -t IPS < <(sort -u "$TMP_IPS")
 
+# Если DNS ничего не вернул, старые правила не трогаем
 if [[ ${#IPS[@]} -eq 0 ]]; then
-  log "Не удалось получить IPv4-адреса для доменов из списка"
+  log "Не удалось получить IPv4-адреса; старые правила оставлены без изменений"
   exit 0
 fi
 
+# Удаляем ранее добавленные правила только после успешного резолва
+if [[ -f "$STATE_FILE" ]]; then
+  while IFS='|' read -r prio ipaddr; do
+    [[ -n "${prio:-}" && -n "${ipaddr:-}" ]] || continue
+    ip rule del to "${ipaddr}/32" lookup main priority "$prio" 2>/dev/null || true
+  done < "$STATE_FILE"
+fi
+
+: > "$STATE_FILE"
+
 prio="$PRIO_BASE"
 for ipaddr in "${IPS[@]}"; do
-  ip rule add to "${ipaddr}/32" lookup main priority "$prio"
+  ip rule add to "${ipaddr}/32" lookup main priority "$prio" 2>/dev/null || true
   echo "${prio}|${ipaddr}" >> "$STATE_FILE"
   prio=$((prio + 1))
 done
