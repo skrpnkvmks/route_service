@@ -1,0 +1,60 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+DOMAINS_FILE="/etc/split-direct/domains.txt"
+SERVICE="split-direct-update.service"
+
+usage() {
+  cat <<USAGE
+Использование:
+  sudo split-direct add DOMAIN
+  sudo split-direct remove DOMAIN
+  sudo split-direct list
+  sudo split-direct update
+USAGE
+}
+
+mkdir -p /etc/split-direct
+touch "$DOMAINS_FILE"
+
+cmd="${1:-}"
+arg="${2:-}"
+
+normalize() {
+  echo "$1" | tr '[:upper:]' '[:lower:]' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//'
+}
+
+case "$cmd" in
+  add)
+    [[ -n "$arg" ]] || { usage; exit 1; }
+    domain="$(normalize "$arg")"
+    if ! grep -Fxq "$domain" "$DOMAINS_FILE"; then
+      echo "$domain" | sudo tee -a "$DOMAINS_FILE" >/dev/null
+      sort -u -o "$DOMAINS_FILE" "$DOMAINS_FILE"
+      echo "Добавлен: $domain"
+    else
+      echo "Уже есть: $domain"
+    fi
+    sudo systemctl start "$SERVICE"
+    ;;
+  remove)
+    [[ -n "$arg" ]] || { usage; exit 1; }
+    domain="$(normalize "$arg")"
+    tmp="$(mktemp)"
+    grep -Fvx "$domain" "$DOMAINS_FILE" > "$tmp" || true
+    sudo cp "$tmp" "$DOMAINS_FILE"
+    rm -f "$tmp"
+    echo "Удалён: $domain"
+    sudo systemctl start "$SERVICE"
+    ;;
+  list)
+    cat "$DOMAINS_FILE"
+    ;;
+  update)
+    sudo systemctl start "$SERVICE"
+    ;;
+  *)
+    usage
+    exit 1
+    ;;
+esac

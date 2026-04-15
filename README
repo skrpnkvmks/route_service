@@ -1,0 +1,274 @@
+# split-direct: выборочный обход VPN для доменов
+
+## Описание
+
+Этот набор скриптов позволяет:
+
+- направлять трафик к выбранным сайтам **напрямую (мимо VPN)**
+- оставлять весь остальной трафик **через WireGuard (full tunnel)**
+
+Работает через `ip rule` и маршрутизацию по IP.
+
+---
+
+## Как это работает
+
+1. Список доменов хранится в файле:
+
+/etc/split-direct/domains.txt
+
+
+2. Скрипт:
+- резолвит домены → IP
+- добавляет правила:
+  ```
+  ip rule add to <IP>/32 lookup main
+  ```
+- удаляет старые правила перед обновлением
+
+3. systemd timer:
+- обновляет IP раз в час
+
+---
+
+## Требования
+
+- Linux (проверено на Fedora)
+- WireGuard (full tunnel)
+- systemd
+- утилиты:
+  - `ip` (iproute2)
+  - `dig` (bind-utils)
+
+---
+
+## Установка
+
+### 1. Создать директорию
+
+```bash
+sudo mkdir -p /etc/split-direct
+```
+
+### 2. Создать список доменов
+
+```bash
+sudo nano /etc/split-direct/domains.txt
+```
+
+Пример:
+
+```txt
+hh.ru
+spb.hh.ru
+hhcdn.ru
+2gis.ru
+```
+
+### 3. Установить скрипт обновления
+
+В этом репозитории скрипт лежит в `usr/local/bin/split-direct-update`.
+
+```bash
+sudo install -D -m 0755 usr/local/bin/split-direct-update /usr/local/bin/split-direct-update
+```
+
+### 4. Установить CLI-скрипт
+
+В этом репозитории CLI лежит в `usr/local/bin/split-direct`.
+
+```bash
+sudo install -D -m 0755 usr/local/bin/split-direct /usr/local/bin/split-direct
+```
+
+### 5. Установить systemd service
+
+В этом репозитории unit лежит в `etc/systemd/system/split-direct-update.service`.
+
+```bash
+sudo install -D -m 0644 etc/systemd/system/split-direct-update.service /etc/systemd/system/split-direct-update.service
+```
+
+Содержимое (для справки):
+
+```ini
+[Unit]
+Description=Update direct-routing IP rules for selected domains
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/split-direct-update
+```
+
+### 6. Установить systemd timer
+
+В этом репозитории unit лежит в `etc/systemd/system/split-direct-update.timer`.
+
+```bash
+sudo install -D -m 0644 etc/systemd/system/split-direct-update.timer /etc/systemd/system/split-direct-update.timer
+```
+
+Содержимое (для справки):
+
+```ini
+[Unit]
+Description=Run split-direct update hourly
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=1h
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+```
+
+### 7. Включить
+
+```bash
+sudo systemctl daemon-reexec
+sudo systemctl daemon-reload
+
+sudo systemctl enable --now split-direct-update.timer
+sudo systemctl start split-direct-update.service
+```
+
+---
+
+## Использование
+
+Показать список:
+
+```bash
+sudo split-direct list
+```
+
+Добавить сайт:
+
+```bash
+sudo split-direct add hh.ru
+```
+
+Удалить сайт:
+
+```bash
+sudo split-direct remove hh.ru
+```
+
+Обновить вручную:
+
+```bash
+sudo split-direct update
+```
+
+---
+
+## Проверка
+
+Проверка маршрута:
+
+```bash
+ip route get <IP>
+```
+
+Должно идти через (пример):
+
+```txt
+dev wlp4s0 via 192.168.0.1
+```
+
+а не через (пример):
+
+```txt
+wg0clientlinux
+```
+
+Проверка работы:
+
+```bash
+curl ifconfig.me
+```
+
+→ VPN IP
+
+```bash
+curl -I https://hh.ru
+```
+
+→ сайт открывается
+
+---
+
+## Особенности
+
+1. Работает по IPv4  
+IPv6 не обрабатывается.
+
+2. Поддомены  
+Wildcard (`*.hh.ru`) не поддерживается. Нужно явно добавлять:
+
+```txt
+hh.ru
+spb.hh.ru
+api.hh.ru
+```
+
+3. CDN  
+Некоторые сайты используют отдельные домены (например `hhcdn.ru`) — их тоже нужно добавлять.
+
+4. Изменение IP  
+IP доменов меняются → поэтому есть автообновление.
+
+---
+
+## Логи
+
+```bash
+journalctl -u split-direct-update.service -n 50
+```
+
+---
+
+## Удаление
+
+```bash
+sudo systemctl disable --now split-direct-update.timer
+sudo systemctl disable --now split-direct-update.service
+
+sudo rm -f /usr/local/bin/split-direct
+sudo rm -f /usr/local/bin/split-direct-update
+
+sudo rm -f /etc/systemd/system/split-direct-update.timer
+sudo rm -f /etc/systemd/system/split-direct-update.service
+
+sudo rm -rf /etc/split-direct
+sudo systemctl daemon-reload
+```
+
+Очистка правил:
+
+1) Если `/run/split-direct.rules` ещё существует, можно запустить сервис один раз (он удалит ранее добавленные правила из state-файла):
+
+```bash
+sudo systemctl start split-direct-update.service
+```
+
+2) Внимание: `sudo ip rule flush` удалит **все** policy routing rules в системе (может сломать сеть). Используйте только если понимаете последствия:
+
+```bash
+sudo ip rule flush
+sudo ip route flush cache
+```
+
+---
+
+## Пример минимальной конфигурации
+
+```txt
+hh.ru
+spb.hh.ru
+hhcdn.ru
+2gis.ru
+```

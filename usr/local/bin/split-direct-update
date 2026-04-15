@@ -1,0 +1,79 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+DOMAINS_FILE="/etc/split-direct/domains.txt"
+STATE_FILE="/run/split-direct.rules"
+PRIO_BASE=10000
+
+log() {
+  logger -t split-direct-update "$*"
+  echo "$*"
+}
+
+require_cmd() {
+  command -v "$1" >/dev/null 2>&1 || {
+    echo "Не найдена команда: $1" >&2
+    exit 1
+  }
+}
+
+require_cmd ip
+require_cmd dig
+require_cmd awk
+require_cmd sort
+require_cmd uniq
+
+mkdir -p /run
+
+# Удаляем ранее добавленные правила
+if [[ -f "$STATE_FILE" ]]; then
+  while IFS='|' read -r prio ipaddr; do
+    [[ -n "${prio:-}" && -n "${ipaddr:-}" ]] || continue
+    ip rule del to "${ipaddr}/32" lookup main priority "$prio" 2>/dev/null || true
+  done < "$STATE_FILE"
+fi
+
+: > "$STATE_FILE"
+
+if [[ ! -f "$DOMAINS_FILE" ]]; then
+  log "Файл доменов не найден: $DOMAINS_FILE"
+  exit 0
+fi
+
+mapfile -t DOMAINS < <(
+  sed 's/[[:space:]]*#.*$//' "$DOMAINS_FILE" \
+    | sed '/^[[:space:]]*$/d' \
+    | tr '[:upper:]' '[:lower:]' \
+    | sort -u
+)
+
+if [[ ${#DOMAINS[@]} -eq 0 ]]; then
+  log "Список доменов пуст"
+  exit 0
+fi
+
+TMP_IPS="$(mktemp)"
+trap 'rm -f "$TMP_IPS"' EXIT
+
+for domain in "${DOMAINS[@]}"; do
+  dig +short A "$domain" \
+    | awk '/^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ {print $0}' \
+    >> "$TMP_IPS" || true
+done
+
+mapfile -t IPS < <(sort -u "$TMP_IPS")
+
+if [[ ${#IPS[@]} -eq 0 ]]; then
+  log "Не удалось получить IPv4-адреса для доменов из списка"
+  exit 0
+fi
+
+prio="$PRIO_BASE"
+for ipaddr in "${IPS[@]}"; do
+  ip rule add to "${ipaddr}/32" lookup main priority "$prio"
+  echo "${prio}|${ipaddr}" >> "$STATE_FILE"
+  prio=$((prio + 1))
+done
+
+ip route flush cache || true
+log "Обновлено правил: ${#IPS[@]}"
