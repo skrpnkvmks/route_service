@@ -2,9 +2,15 @@
 set -euo pipefail
 
 ACTION="${2:-}"
+UUID="${CONNECTION_UUID:-}"
 
-case "$ACTION" in
-  vpn-up)
-    /usr/local/bin/split-direct-update
-    ;;
-esac
+[[ "$ACTION" == "up" ]] || exit 0
+[[ -n "$UUID" ]] || exit 0
+
+TYPE="$(
+  /usr/bin/nmcli -g connection.type connection show "$UUID" 2>/dev/null || true
+)"
+
+[[ "$TYPE" == "wireguard" ]] || exit 0
+
+/usr/local/bin/split-direct-update
